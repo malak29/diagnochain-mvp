@@ -1,552 +1,641 @@
 import React, { useState, useEffect } from 'react';
-import { Calendar, FileText, Star, Clock, User, Search, Filter, Plus, Bitcoin, DollarSign } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../hooks/useAuth';
+import { useWallet } from '../../hooks/useWallet';
+import { 
+  Activity,
+  FileText,
+  Calendar,
+  Shield,
+  CreditCard,
+  TrendingUp,
+  AlertCircle,
+  CheckCircle,
+  Clock,
+  Users,
+  Bitcoin,
+  Lock,
+  Eye,
+  Download,
+  Share2,
+  Plus,
+  ArrowRight,
+  Heart,
+  Thermometer,
+  Scale,
+  Zap
+} from 'lucide-react';
 
-const PatientDashboard = ({ account, onNavigate }) => {
-  const [consultations, setConsultations] = useState([]);
-  const [diagnosticNFTs, setDiagnosticNFTs] = useState([]);
-  const [availableDoctors, setAvailableDoctors] = useState([]);
-  const [isBookingOpen, setIsBookingOpen] = useState(false);
-  const [selectedSpecialty, setSelectedSpecialty] = useState('');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [selectedDoctor, setSelectedDoctor] = useState(null);
-  const [symptoms, setSymptoms] = useState('');
-  const [isUrgent, setIsUrgent] = useState(false);
-
-  const specialties = [
-    'general_practice', 'dermatology', 'cardiology', 
-    'neurology', 'oncology', 'psychiatry'
-  ];
-
-  const mockConsultations = [
-    {
-      id: 1,
-      doctor: '0x742d35Cc9F8f34D9b9C8c7D2B4b1234567890abc',
-      doctorName: 'Dr. Sarah Chen',
-      specialty: 'dermatology',
-      status: 'completed',
-      fee: '0.05',
-      date: '2025-08-25',
-      diagnosisHash: 'QmX7Y8Z9...',
-      rating: 5,
-      nftId: 'DGMR001'
-    },
-    {
-      id: 2,
-      doctor: '0x123def456789abcdef123456789abcdef12345678',
-      doctorName: 'Dr. Michael Rodriguez',
-      specialty: 'cardiology',
-      status: 'in_progress',
-      fee: '0.08',
-      date: '2025-08-28',
-      diagnosisHash: '',
-      rating: 0
-    },
-    {
-      id: 3,
-      doctor: '0x987fed321cba987fed321cba987fed321cba9876',
-      doctorName: 'Dr. James Wilson',
-      specialty: 'general_practice',
-      status: 'pending',
-      fee: '0.04',
-      date: '2025-08-28',
-      rating: 0
-    }
-  ];
-
-  const mockDoctors = [
-    {
-      address: '0x742d35Cc9F8f34D9b9C8c7D2B4b1234567890abc',
-      name: 'Dr. Sarah Chen',
-      specialty: 'dermatology',
-      rating: 4.8,
-      consultations: 156,
-      responseTime: '12 min',
-      fee: '0.05',
-      isOnline: true,
-      verification: 'Verified MD, Stanford Medical'
-    },
-    {
-      address: '0x987fed321cba987fed321cba987fed321cba9876',
-      name: 'Dr. James Wilson',
-      specialty: 'general_practice',
-      rating: 4.6,
-      consultations: 89,
-      responseTime: '18 min',
-      fee: '0.04',
-      isOnline: false,
-      verification: 'Verified MD, Johns Hopkins'
-    },
-    {
-      address: '0x456abc789def456abc789def456abc789def4567',
-      name: 'Dr. Maria Santos',
-      specialty: 'cardiology',
-      rating: 4.9,
-      consultations: 203,
-      responseTime: '8 min',
-      fee: '0.07',
-      isOnline: true,
-      verification: 'Verified MD, Mayo Clinic'
-    },
-    {
-      address: '0xabc123def456abc123def456abc123def456abc1',
-      name: 'Dr. Ahmed Hassan',
-      specialty: 'neurology',
-      rating: 4.7,
-      consultations: 127,
-      responseTime: '15 min',
-      fee: '0.09',
-      isOnline: true,
-      verification: 'Verified MD, Cleveland Clinic'
-    }
-  ];
-
-  const mockNFTs = [
-    {
-      id: 1,
-      tokenId: 'DGMR001',
-      specialty: 'dermatology',
-      date: '2025-08-25',
-      doctor: 'Dr. Sarah Chen',
-      diagnosis: 'Contact Dermatitis',
-      confidence: 8
-    },
-    {
-      id: 2,
-      tokenId: 'DGMR015',
-      specialty: 'general_practice',
-      date: '2025-08-20',
-      doctor: 'Dr. James Wilson',
-      diagnosis: 'Seasonal Allergies',
-      confidence: 9
-    }
-  ];
+const PatientDashboard = () => {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const { isConnected, balance } = useWallet();
+  
+  const [dashboardData, setDashboardData] = useState({
+    healthMetrics: {},
+    recentRecords: [],
+    upcomingAppointments: [],
+    accessGrants: [],
+    blockchainStats: {},
+    notifications: []
+  });
+  
+  const [loading, setLoading] = useState(true);
+  const [selectedTimeframe, setSelectedTimeframe] = useState('30d');
 
   useEffect(() => {
-    loadPatientData();
-  }, [account]);
+    fetchDashboardData();
+  }, [selectedTimeframe]);
 
-  const loadPatientData = async () => {
+  const fetchDashboardData = async () => {
     try {
-      setConsultations(mockConsultations);
-      setAvailableDoctors(mockDoctors);
-      setDiagnosticNFTs(mockNFTs);
+      setLoading(true);
+      const token = localStorage.getItem('accessToken');
+      
+      const responses = await Promise.allSettled([
+        fetch('/api/patients/my-profile', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch(`/api/medical-records?timeframe=${selectedTimeframe}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch('/api/appointments/upcoming', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch('/api/access-grants', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch('/api/blockchain/stats', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch('/api/health-metrics/latest', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+      ]);
+
+      const [profileRes, recordsRes, appointmentsRes, grantsRes, blockchainRes, metricsRes] = responses;
+
+      if (recordsRes.status === 'fulfilled' && recordsRes.value.ok) {
+        const recordsData = await recordsRes.value.json();
+        setDashboardData(prev => ({ ...prev, recentRecords: recordsData.records || [] }));
+      }
+
+      if (appointmentsRes.status === 'fulfilled' && appointmentsRes.value.ok) {
+        const appointmentsData = await appointmentsRes.value.json();
+        setDashboardData(prev => ({ ...prev, upcomingAppointments: appointmentsData.appointments || [] }));
+      }
+
+      if (grantsRes.status === 'fulfilled' && grantsRes.value.ok) {
+        const grantsData = await grantsRes.value.json();
+        setDashboardData(prev => ({ ...prev, accessGrants: grantsData.grants || [] }));
+      }
+
+      if (blockchainRes.status === 'fulfilled' && blockchainRes.value.ok) {
+        const blockchainData = await blockchainRes.value.json();
+        setDashboardData(prev => ({ ...prev, blockchainStats: blockchainData.stats || {} }));
+      }
+
+      if (metricsRes.status === 'fulfilled' && metricsRes.value.ok) {
+        const metricsData = await metricsRes.value.json();
+        setDashboardData(prev => ({ ...prev, healthMetrics: metricsData.metrics || {} }));
+      }
+
     } catch (error) {
-      console.error('Error loading patient data:', error);
+      console.error('Failed to fetch dashboard data:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleBookConsultation = (doctor) => {
-    setSelectedDoctor(doctor);
-    setIsBookingOpen(true);
-  };
+  const StatCard = ({ title, value, subtitle, icon: Icon, color = 'blue', trend, onClick }) => (
+    <div 
+      className={`bg-white rounded-lg border border-gray-200 p-6 hover:shadow-md transition-shadow ${
+        onClick ? 'cursor-pointer' : ''
+      }`}
+      onClick={onClick}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex-1">
+          <p className="text-sm font-medium text-gray-600">{title}</p>
+          <p className={`text-2xl font-bold text-${color}-600 mt-1`}>{value}</p>
+          {subtitle && (
+            <p className="text-sm text-gray-500 mt-1">{subtitle}</p>
+          )}
+          {trend && (
+            <div className={`flex items-center mt-2 text-sm ${
+              trend.direction === 'up' ? 'text-green-600' : trend.direction === 'down' ? 'text-red-600' : 'text-gray-600'
+            }`}>
+              <TrendingUp className="h-4 w-4 mr-1" />
+              <span>{trend.value}</span>
+            </div>
+          )}
+        </div>
+        <div className={`p-3 rounded-full bg-${color}-50`}>
+          <Icon className={`h-6 w-6 text-${color}-600`} />
+        </div>
+      </div>
+    </div>
+  );
 
-  const submitBooking = async () => {
-    try {
-      console.log('Booking consultation:', {
-        doctor: selectedDoctor.address,
-        symptoms,
-        isUrgent,
-        fee: selectedDoctor.fee
-      });
-      
-      const newConsultation = {
-        id: consultations.length + 1,
-        doctor: selectedDoctor.address,
-        doctorName: selectedDoctor.name,
-        specialty: selectedDoctor.specialty,
-        status: 'pending',
-        fee: selectedDoctor.fee,
-        date: new Date().toISOString().split('T')[0],
-        rating: 0
-      };
-      
-      setConsultations(prev => [newConsultation, ...prev]);
-      setIsBookingOpen(false);
-      setSymptoms('');
-      setIsUrgent(false);
-      
-      alert('Consultation booked successfully! Payment held in escrow.');
-    } catch (error) {
-      console.error('Error booking consultation:', error);
-    }
-  };
+  const QuickAction = ({ title, description, icon: Icon, color, onClick }) => (
+    <button
+      onClick={onClick}
+      className="flex items-center p-4 bg-white rounded-lg border border-gray-200 hover:shadow-md hover:border-gray-300 transition-all group w-full text-left"
+    >
+      <div className={`p-2 rounded-lg bg-${color}-50 group-hover:bg-${color}-100 transition-colors`}>
+        <Icon className={`h-6 w-6 text-${color}-600`} />
+      </div>
+      <div className="ml-4 flex-1">
+        <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+        <p className="text-sm text-gray-600 mt-1">{description}</p>
+      </div>
+      <ArrowRight className="h-5 w-5 text-gray-400 group-hover:text-gray-600 transition-colors" />
+    </button>
+  );
 
-  const filteredDoctors = availableDoctors.filter(doctor => {
-    const matchesSearch = doctor.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         doctor.specialty.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesSpecialty = !selectedSpecialty || doctor.specialty === selectedSpecialty;
-    return matchesSearch && matchesSpecialty;
-  });
-
-  const renderStars = (rating) => {
-    return Array.from({ length: 5 }, (_, i) => (
-      <Star 
-        key={i} 
-        className={`h-4 w-4 ${i < Math.floor(rating) ? 'text-yellow-400 fill-current' : 'text-gray-300'}`} 
-      />
-    ));
-  };
-
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'completed': return 'text-green-600 bg-green-100';
-      case 'in_progress': return 'text-blue-600 bg-blue-100';
-      case 'pending': return 'text-yellow-600 bg-yellow-100';
-      case 'disputed': return 'text-red-600 bg-red-100';
-      default: return 'text-gray-600 bg-gray-100';
-    }
-  };
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">Patient Dashboard</h1>
-        <p className="text-gray-600">Manage your consultations and health records</p>
-      </div>
-
-      <div className="flex flex-col lg:flex-row gap-8">
-        <div className="lg:w-1/4">
-          <nav className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-            <div className="space-y-2">
-              <button
-                onClick={() => setActiveTab('dashboard')}
-                className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                  activeTab === 'dashboard' 
-                    ? 'bg-indigo-100 text-indigo-700' 
-                    : 'text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                <Calendar className="h-4 w-4 inline mr-2" />
-                My Consultations
-              </button>
-              <button
-                onClick={() => setActiveTab('records')}
-                className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                  activeTab === 'records' 
-                    ? 'bg-indigo-100 text-indigo-700' 
-                    : 'text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                <FileText className="h-4 w-4 inline mr-2" />
-                Medical NFTs
-              </button>
-              <button
-                onClick={() => setActiveTab('doctors')}
-                className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                  activeTab === 'doctors' 
-                    ? 'bg-indigo-100 text-indigo-700' 
-                    : 'text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                <User className="h-4 w-4 inline mr-2" />
-                Find Doctors
-              </button>
-            </div>
-          </nav>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Welcome back, {user?.personalInfo?.firstName}! 👋
+          </h1>
+          <p className="text-gray-600 mt-1">
+            Here's an overview of your health data and recent activity.
+          </p>
         </div>
-
-        <div className="lg:w-3/4">
-          {activeTab === 'dashboard' && (
-            <div className="space-y-6">
-              <div className="flex justify-between items-center">
-                <h2 className="text-xl font-semibold text-gray-900">Recent Consultations</h2>
-                <button
-                  onClick={() => setActiveTab('doctors')}
-                  className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors flex items-center"
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Consultation
-                </button>
-              </div>
-
-              <div className="grid gap-4">
-                {consultations.map((consultation) => (
-                  <div key={consultation.id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                    <div className="flex justify-between items-start mb-4">
-                      <div>
-                        <h3 className="font-semibold text-gray-900">{consultation.doctorName}</h3>
-                        <p className="text-sm text-gray-600 capitalize">{consultation.specialty}</p>
-                        {consultation.nftId && (
-                          <p className="text-xs text-indigo-600 mt-1">NFT: {consultation.nftId}</p>
-                        )}
-                      </div>
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium capitalize ${getStatusColor(consultation.status)}`}>
-                        {consultation.status.replace('_', ' ')}
-                      </span>
-                    </div>
-                    
-                    <div className="grid md:grid-cols-3 gap-4 mb-4">
-                      <div className="flex items-center text-sm text-gray-600">
-                        <Calendar className="h-4 w-4 mr-2" />
-                        {consultation.date}
-                      </div>
-                      <div className="flex items-center text-sm text-gray-600">
-                        <DollarSign className="h-4 w-4 mr-2" />
-                        {consultation.fee} ETH
-                      </div>
-                      {consultation.rating > 0 && (
-                        <div className="flex items-center">
-                          {renderStars(consultation.rating)}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex space-x-3">
-                      {consultation.status === 'completed' && (
-                        <button 
-                          onClick={() => onNavigate('consultation')}
-                          className="text-indigo-600 hover:text-indigo-800 text-sm font-medium"
-                        >
-                          View Diagnosis →
-                        </button>
-                      )}
-                      {consultation.status === 'pending' && (
-                        <button className="text-yellow-600 hover:text-yellow-800 text-sm font-medium">
-                          Waiting for Doctor →
-                        </button>
-                      )}
-                      {consultation.status === 'in_progress' && (
-                        <button 
-                          onClick={() => onNavigate('consultation')}
-                          className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-                        >
-                          View Progress →
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'records' && (
-            <div className="space-y-6">
-              <h2 className="text-xl font-semibold text-gray-900">My Medical NFTs</h2>
-              
-              <div className="grid md:grid-cols-2 gap-6">
-                {diagnosticNFTs.map((nft) => (
-                  <div key={nft.id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center">
-                        <FileText className="h-8 w-8 text-indigo-600 mr-3" />
-                        <div>
-                          <h3 className="font-semibold text-gray-900">{nft.tokenId}</h3>
-                          <p className="text-sm text-gray-600 capitalize">{nft.specialty}</p>
-                        </div>
-                      </div>
-                      <Bitcoin className="h-6 w-6 text-orange-500" />
-                    </div>
-                    
-                    <div className="space-y-2 text-sm text-gray-600 mb-4">
-                      <p><span className="font-medium">Doctor:</span> {nft.doctor}</p>
-                      <p><span className="font-medium">Date:</span> {nft.date}</p>
-                      <p><span className="font-medium">Diagnosis:</span> {nft.diagnosis}</p>
-                      <p><span className="font-medium">Confidence:</span> {nft.confidence}/10</p>
-                    </div>
-                    
-                    <div className="flex space-x-3">
-                      <button className="flex-1 bg-gray-100 text-gray-700 px-3 py-2 rounded-md text-sm hover:bg-gray-200 transition-colors">
-                        View Record
-                      </button>
-                      <button 
-                        onClick={() => {
-                          setActiveTab('doctors');
-                          alert('Select a different doctor for a second opinion');
-                        }}
-                        className="flex-1 bg-indigo-100 text-indigo-700 px-3 py-2 rounded-md text-sm hover:bg-indigo-200 transition-colors"
-                      >
-                        Second Opinion
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {diagnosticNFTs.length === 0 && (
-                <div className="bg-white rounded-lg p-8 text-center">
-                  <FileText className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-                  <p className="text-gray-600">No medical records yet</p>
-                  <p className="text-sm text-gray-500 mt-2">Complete a consultation to receive your first diagnostic NFT</p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === 'doctors' && (
-            <div className="space-y-6">
-              <div className="flex flex-col md:flex-row gap-4 mb-6">
-                <div className="flex-1 relative">
-                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                  <input
-                    type="text"
-                    placeholder="Search doctors by name or specialty..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                  />
-                </div>
-                
-                <select
-                  value={selectedSpecialty}
-                  onChange={(e) => setSelectedSpecialty(e.target.value)}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                >
-                  <option value="">All Specialties</option>
-                  {specialties.map(specialty => (
-                    <option key={specialty} value={specialty}>
-                      {specialty.replace('_', ' ').toUpperCase()}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid gap-6">
-                {filteredDoctors.map((doctor) => (
-                  <div key={doctor.address} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
-                        <div className="flex items-center mb-2">
-                          <h3 className="text-lg font-semibold text-gray-900 mr-3">{doctor.name}</h3>
-                          <div className={`w-3 h-3 rounded-full ${doctor.isOnline ? 'bg-green-400' : 'bg-gray-400'}`}></div>
-                          <span className="text-sm text-gray-500 ml-2">
-                            {doctor.isOnline ? 'Online' : 'Offline'}
-                          </span>
-                        </div>
-                        
-                        <p className="text-gray-600 capitalize mb-2">{doctor.specialty.replace('_', ' ')}</p>
-                        <p className="text-xs text-gray-500 mb-3">{doctor.verification}</p>
-                        
-                        <div className="grid md:grid-cols-3 gap-4 mb-4">
-                          <div className="flex items-center text-sm text-gray-600">
-                            <Star className="h-4 w-4 mr-1 text-yellow-400" />
-                            {doctor.rating} ({doctor.consultations} reviews)
-                          </div>
-                          <div className="flex items-center text-sm text-gray-600">
-                            <Clock className="h-4 w-4 mr-1" />
-                            Avg {doctor.responseTime}
-                          </div>
-                          <div className="flex items-center text-sm text-gray-600">
-                            <DollarSign className="h-4 w-4 mr-1" />
-                            {doctor.fee} ETH
-                          </div>
-                        </div>
-
-                        <div className="flex items-center space-x-2">
-                          {renderStars(doctor.rating)}
-                        </div>
-                      </div>
-
-                      <div className="ml-6">
-                        <button
-                          onClick={() => handleBookConsultation(doctor)}
-                          disabled={!doctor.isOnline}
-                          className={`px-6 py-2 rounded-lg font-medium transition-colors ${
-                            doctor.isOnline
-                              ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                          }`}
-                        >
-                          {doctor.isOnline ? 'Book Now' : 'Offline'}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+        
+        <div className="flex items-center space-x-3">
+          <select
+            value={selectedTimeframe}
+            onChange={(e) => setSelectedTimeframe(e.target.value)}
+            className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="90d">Last 3 months</option>
+            <option value="1y">Last year</option>
+          </select>
+          
+          <button
+            onClick={() => navigate('/medical-records/new')}
+            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition-colors flex items-center space-x-2"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Add Record</span>
+          </button>
         </div>
       </div>
 
-      {isBookingOpen && selectedDoctor && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6 max-h-[80vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
-              Book Consultation with {selectedDoctor.name}
-            </h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+        <StatCard
+          title="Total Records"
+          value={dashboardData.recentRecords.length || 0}
+          subtitle="Medical records stored"
+          icon={FileText}
+          color="blue"
+          onClick={() => navigate('/medical-records')}
+        />
+        
+        <StatCard
+          title="Active Doctors"
+          value={dashboardData.accessGrants.filter(g => g.isActive).length || 0}
+          subtitle="Healthcare providers with access"
+          icon={Users}
+          color="green"
+          onClick={() => navigate('/access-control')}
+        />
+        
+        <StatCard
+          title="Blockchain Health"
+          value={dashboardData.blockchainStats.healthScore || 'N/A'}
+          subtitle="Data integrity score"
+          icon={Shield}
+          color="purple"
+          trend={{
+            direction: 'up',
+            value: '+2.3% this month'
+          }}
+          onClick={() => navigate('/data-integrity')}
+        />
+        
+        <StatCard
+          title="Wallet Balance"
+          value={isConnected ? `${formatBalance(balance)} BTC` : 'Not Connected'}
+          subtitle="Available for payments"
+          icon={Bitcoin}
+          color="orange"
+          onClick={() => navigate('/wallet')}
+        />
+      </div>
+
+      {dashboardData.healthMetrics && Object.keys(dashboardData.healthMetrics).length > 0 && (
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+            <Heart className="h-5 w-5 mr-2 text-red-500" />
+            Latest Health Metrics
+          </h2>
+          
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {dashboardData.healthMetrics.bloodPressure && (
+              <div className="flex items-center p-4 bg-red-50 rounded-lg">
+                <Heart className="h-8 w-8 text-red-500 mr-3" />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">Blood Pressure</p>
+                  <p className="text-lg font-bold text-red-600">
+                    {dashboardData.healthMetrics.bloodPressure}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {dashboardData.healthMetrics.bpDate}
+                  </p>
+                </div>
+              </div>
+            )}
             
-            <div className="space-y-4 mb-6">
-              <div className="bg-gray-50 p-3 rounded-lg">
-                <div className="text-sm text-gray-600 space-y-1">
-                  <p><span className="font-medium">Specialty:</span> {selectedDoctor.specialty.replace('_', ' ')}</p>
-                  <p><span className="font-medium">Rating:</span> {selectedDoctor.rating}/5</p>
-                  <p><span className="font-medium">Response Time:</span> {selectedDoctor.responseTime}</p>
+            {dashboardData.healthMetrics.temperature && (
+              <div className="flex items-center p-4 bg-orange-50 rounded-lg">
+                <Thermometer className="h-8 w-8 text-orange-500 mr-3" />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">Temperature</p>
+                  <p className="text-lg font-bold text-orange-600">
+                    {dashboardData.healthMetrics.temperature}°F
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {dashboardData.healthMetrics.tempDate}
+                  </p>
                 </div>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Describe your symptoms *
-                </label>
-                <textarea
-                  value={symptoms}
-                  onChange={(e) => setSymptoms(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                  rows="4"
-                  placeholder="Please describe your symptoms in detail..."
-                  required
-                />
-              </div>
-
-              <div className="flex items-center">
-                <input 
-                  type="checkbox" 
-                  id="urgent"
-                  checked={isUrgent}
-                  onChange={(e) => setIsUrgent(e.target.checked)}
-                  className="mr-2 h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded" 
-                />
-                <label htmlFor="urgent" className="text-sm text-gray-700">
-                  Urgent consultation (+20% fee, 2hr response time)
-                </label>
-              </div>
-
-              <div className="bg-gray-50 p-4 rounded-lg">
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span>Consultation Fee:</span>
-                    <span>{selectedDoctor.fee} ETH</span>
-                  </div>
-                  {isUrgent && (
-                    <div className="flex justify-between text-orange-600">
-                      <span>Urgent Fee (+20%):</span>
-                      <span>+{(parseFloat(selectedDoctor.fee) * 0.2).toFixed(3)} ETH</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between font-medium border-t pt-2">
-                    <span>Total:</span>
-                    <span>{isUrgent ? (parseFloat(selectedDoctor.fee) * 1.2).toFixed(3) : selectedDoctor.fee} ETH</span>
-                  </div>
-                  <div className="flex justify-between text-xs text-gray-500">
-                    <span>≈ Bitcoin equivalent:</span>
-                    <span>~0.00234 BTC</span>
-                  </div>
+            )}
+            
+            {dashboardData.healthMetrics.weight && (
+              <div className="flex items-center p-4 bg-blue-50 rounded-lg">
+                <Scale className="h-8 w-8 text-blue-500 mr-3" />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">Weight</p>
+                  <p className="text-lg font-bold text-blue-600">
+                    {dashboardData.healthMetrics.weight} lbs
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {dashboardData.healthMetrics.weightDate}
+                  </p>
                 </div>
               </div>
-            </div>
-
-            <div className="flex space-x-3">
-              <button
-                onClick={() => setIsBookingOpen(false)}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={submitBooking}
-                disabled={!symptoms.trim()}
-                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Book & Pay
-              </button>
-            </div>
+            )}
           </div>
         </div>
       )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+              <Clock className="h-5 w-5 mr-2 text-blue-500" />
+              Recent Activity
+            </h2>
+            <button
+              onClick={() => navigate('/medical-records')}
+              className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+            >
+              View all
+            </button>
+          </div>
+          
+          <div className="space-y-3">
+            {dashboardData.recentRecords.slice(0, 5).map((record, index) => (
+              <div key={record.id || index} className="flex items-start space-x-3 p-3 hover:bg-gray-50 rounded-lg transition-colors">
+                <div className={`p-2 rounded-lg ${getRecordTypeColor(record.type)}`}>
+                  {getRecordIcon(record.type)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {record.title || record.type}
+                  </p>
+                  <p className="text-sm text-gray-600 truncate">
+                    {record.description || 'No description available'}
+                  </p>
+                  <div className="flex items-center mt-1 space-x-2">
+                    <span className="text-xs text-gray-400">
+                      {new Date(record.createdAt).toLocaleDateString()}
+                    </span>
+                    {record.doctorName && (
+                      <>
+                        <span className="text-xs text-gray-400">•</span>
+                        <span className="text-xs text-gray-400">
+                          Dr. {record.doctorName}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <button className="text-gray-400 hover:text-gray-600 p-1">
+                  <Eye className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+            
+            {dashboardData.recentRecords.length === 0 && (
+              <div className="text-center py-8 text-gray-500">
+                <FileText className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                <p>No recent medical records</p>
+                <button
+                  onClick={() => navigate('/medical-records/new')}
+                  className="mt-2 text-blue-600 hover:text-blue-700 text-sm font-medium"
+                >
+                  Add your first record
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+              <Calendar className="h-5 w-5 mr-2 text-green-500" />
+              Upcoming Appointments
+            </h2>
+            <button
+              onClick={() => navigate('/appointments')}
+              className="text-green-600 hover:text-green-700 text-sm font-medium"
+            >
+              Schedule new
+            </button>
+          </div>
+          
+          <div className="space-y-3">
+            {dashboardData.upcomingAppointments.slice(0, 4).map((appointment, index) => (
+              <div key={appointment.id || index} className="flex items-center space-x-3 p-3 hover:bg-gray-50 rounded-lg transition-colors">
+                <div className="flex-shrink-0">
+                  <div className="h-10 w-10 bg-green-100 rounded-lg flex items-center justify-center">
+                    <Calendar className="h-5 w-5 text-green-600" />
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900">
+                    {appointment.type || 'General Consultation'}
+                  </p>
+                  <p className="text-sm text-gray-600">
+                    Dr. {appointment.doctorName}
+                  </p>
+                  <div className="flex items-center mt-1 space-x-2 text-xs text-gray-400">
+                    <span>{new Date(appointment.dateTime).toLocaleDateString()}</span>
+                    <span>•</span>
+                    <span>{new Date(appointment.dateTime).toLocaleTimeString()}</span>
+                  </div>
+                </div>
+                <div className="flex-shrink-0">
+                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                    appointment.status === 'confirmed' 
+                      ? 'bg-green-100 text-green-700' 
+                      : 'bg-yellow-100 text-yellow-700'
+                  }`}>
+                    {appointment.status || 'pending'}
+                  </span>
+                </div>
+              </div>
+            ))}
+            
+            {dashboardData.upcomingAppointments.length === 0 && (
+              <div className="text-center py-8 text-gray-500">
+                <Calendar className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                <p>No upcoming appointments</p>
+                <button
+                  onClick={() => navigate('/appointments/new')}
+                  className="mt-2 text-green-600 hover:text-green-700 text-sm font-medium"
+                >
+                  Schedule an appointment
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 bg-white rounded-lg border border-gray-200 p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+              <Shield className="h-5 w-5 mr-2 text-purple-500" />
+              Data Access Control
+            </h2>
+            <button
+              onClick={() => navigate('/access-control')}
+              className="text-purple-600 hover:text-purple-700 text-sm font-medium"
+            >
+              Manage access
+            </button>
+          </div>
+          
+          <div className="space-y-4">
+            {dashboardData.accessGrants.slice(0, 3).map((grant, index) => (
+              <div key={grant.id || index} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                <div className="flex items-center space-x-3">
+                  <div className="h-10 w-10 bg-purple-100 rounded-full flex items-center justify-center">
+                    <Users className="h-5 w-5 text-purple-600" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">
+                      Dr. {grant.doctorName}
+                    </p>
+                    <p className="text-sm text-gray-600">
+                      {grant.permissions.join(', ')} access
+                    </p>
+                    <p className="text-xs text-gray-400">
+                      Granted {new Date(grant.createdAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="flex items-center space-x-2">
+                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                    grant.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                  }`}>
+                    {grant.isActive ? 'Active' : 'Expired'}
+                  </span>
+                  
+                  {grant.expirationDate && (
+                    <span className="text-xs text-gray-400">
+                      Expires {new Date(grant.expirationDate).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+            
+            {dashboardData.accessGrants.length === 0 && (
+              <div className="text-center py-8 text-gray-500">
+                <Lock className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                <p>No active access grants</p>
+                <button
+                  onClick={() => navigate('/access-control/new')}
+                  className="mt-2 text-purple-600 hover:text-purple-700 text-sm font-medium"
+                >
+                  Grant access to a doctor
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+              <Zap className="h-5 w-5 mr-2 text-yellow-500" />
+              Quick Actions
+            </h3>
+            
+            <div className="space-y-3">
+              <QuickAction
+                title="Upload Medical Document"
+                description="Scan and upload lab results, prescriptions"
+                icon={FileText}
+                color="blue"
+                onClick={() => navigate('/upload')}
+              />
+              
+              <QuickAction
+                title="Share Health Data"
+                description="Grant temporary access to a healthcare provider"
+                icon={Share2}
+                color="green"
+                onClick={() => navigate('/access-control/new')}
+              />
+              
+              <QuickAction
+                title="View Transaction History"
+                description="See all blockchain transactions"
+                icon={Activity}
+                color="purple"
+                onClick={() => navigate('/transactions')}
+              />
+              
+              <QuickAction
+                title="Download Health Report"
+                description="Generate comprehensive health summary"
+                icon={Download}
+                color="orange"
+                onClick={() => navigate('/reports/generate')}
+              />
+            </div>
+          </div>
+
+          <div className="bg-gradient-to-r from-blue-500 to-purple-600 rounded-lg p-6 text-white">
+            <div className="flex items-center mb-3">
+              <Shield className="h-6 w-6 mr-2" />
+              <h3 className="text-lg font-semibold">Security Status</h3>
+            </div>
+            
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm">Data Encryption</span>
+                <CheckCircle className="h-4 w-4 text-green-300" />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm">Blockchain Backup</span>
+                <CheckCircle className="h-4 w-4 text-green-300" />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm">Access Monitoring</span>
+                <CheckCircle className="h-4 w-4 text-green-300" />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm">2FA Enabled</span>
+                {user?.security?.twoFactorEnabled ? (
+                  <CheckCircle className="h-4 w-4 text-green-300" />
+                ) : (
+                  <AlertCircle className="h-4 w-4 text-yellow-300" />
+                )}
+              </div>
+            </div>
+            
+            {!user?.security?.twoFactorEnabled && (
+              <button
+                onClick={() => navigate('/security/2fa')}
+                className="mt-4 w-full bg-white bg-opacity-20 text-white py-2 px-4 rounded-md hover:bg-opacity-30 transition-colors text-sm font-medium"
+              >
+                Enable Two-Factor Authentication
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+            <Activity className="h-5 w-5 mr-2 text-gray-500" />
+            Blockchain Activity
+          </h2>
+          <button
+            onClick={() => navigate('/blockchain/activity')}
+            className="text-gray-600 hover:text-gray-700 text-sm font-medium"
+          >
+            View details
+          </button>
+        </div>
+        
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="text-center p-4 bg-gray-50 rounded-lg">
+            <p className="text-2xl font-bold text-gray-900">
+              {dashboardData.blockchainStats.totalTransactions || 0}
+            </p>
+            <p className="text-sm text-gray-600">Total Transactions</p>
+          </div>
+          
+          <div className="text-center p-4 bg-gray-50 rounded-lg">
+            <p className="text-2xl font-bold text-green-600">
+              {dashboardData.blockchainStats.dataIntegrityScore || 'N/A'}%
+            </p>
+            <p className="text-sm text-gray-600">Data Integrity</p>
+          </div>
+          
+          <div className="text-center p-4 bg-gray-50 rounded-lg">
+            <p className="text-2xl font-bold text-blue-600">
+              {dashboardData.blockchainStats.lastBackup || 'Never'}
+            </p>
+            <p className="text-sm text-gray-600">Last Backup</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
+};
+
+const getRecordTypeColor = (type) => {
+  const colors = {
+    diagnosis: 'bg-red-100',
+    prescription: 'bg-blue-100',
+    lab_result: 'bg-green-100',
+    imaging: 'bg-purple-100',
+    surgery: 'bg-orange-100',
+    consultation: 'bg-yellow-100'
+  };
+  return colors[type] || 'bg-gray-100';
+};
+
+const getRecordIcon = (type) => {
+  const icons = {
+    diagnosis: <AlertCircle className="h-4 w-4 text-red-600" />,
+    prescription: <FileText className="h-4 w-4 text-blue-600" />,
+    lab_result: <BarChart3 className="h-4 w-4 text-green-600" />,
+    imaging: <Camera className="h-4 w-4 text-purple-600" />,
+    surgery: <Zap className="h-4 w-4 text-orange-600" />,
+    consultation: <MessageSquare className="h-4 w-4 text-yellow-600" />
+  };
+  return icons[type] || <FileText className="h-4 w-4 text-gray-600" />;
+};
+
+const formatBalance = (balance) => {
+  if (!balance || balance === '0') return '0.0000';
+  return parseFloat(balance).toFixed(4);
 };
 
 export default PatientDashboard;
