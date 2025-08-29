@@ -1,0 +1,713 @@
+# DiagnoChain Development Environment
+# Run with: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ================================
+  # Database Services
+  # ================================
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: diagnochain-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: diagnochain_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schemas/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./postgres-config/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    networks:
+      - diagnochain-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d diagnochain_dev"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: diagnochain-redis
+    restart: unless-stopped
+    command: redis-server --requirepass password --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - diagnochain-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+
+  # ================================
+  # Blockchain Infrastructure
+  # ================================
+
+  # Hardhat local Ethereum node
+  hardhat-node:
+    image: node:18-alpine
+    container_name: diagnochain-hardhat
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -c "
+        npm install -g hardhat &&
+        npx hardhat node --hostname 0.0.0.0 --port 8545
+      "
+    ports:
+      - "8545:8545"
+    volumes:
+      - hardhat_data:/app/cache
+    networks:
+      - diagnochain-network
+    environment:
+      - HARDHAT_NETWORK=localhost
+
+  # Bitcoin node (testnet)
+  bitcoin-node:
+    image: ruimarinho/bitcoin-core:23
+    container_name: diagnochain-bitcoin
+    restart: unless-stopped
+    command: >
+      bitcoind
+      -testnet=1
+      -server=1
+      -rpcallowip=0.0.0.0/0
+      -rpcbind=0.0.0.0:18332
+      -rpcuser=bitcoin
+      -rpcpassword=password
+      -zmqpubrawblock=tcp://0.0.0.0:28332
+      -zmqpubrawtx=tcp://0.0.0.0:28333
+      -txindex=1
+      -deprecatedrpc=accounts
+    ports:
+      - "18332:18332"  # RPC
+      - "18333:18333"  # P2P
+      - "28332:28332"  # ZMQ block
+      - "28333:28333"  # ZMQ tx
+    volumes:
+      - bitcoin_data:/home/bitcoin/.bitcoin
+    networks:
+      - diagnochain-network
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-testnet", "-rpcuser=bitcoin", "-rpcpassword=password", "getblockchaininfo"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # Lightning Network node
+  lightning-node:
+    image: lightninglabs/lnd:v0.16.4-beta
+    container_name: diagnochain-lightning
+    restart: unless-stopped
+    depends_on:
+      bitcoin-node:
+        condition: service_healthy
+    command: >
+      lnd
+      --bitcoin.active
+      --bitcoin.testnet
+      --bitcoin.node=bitcoind
+      --bitcoind.rpchost=bitcoin-node:18332
+      --bitcoind.rpcuser=bitcoin
+      --bitcoind.rpcpass=password
+      --bitcoind.zmqpubrawblock=tcp://bitcoin-node:28332
+      --bitcoind.zmqpubrawtx=tcp://bitcoin-node:28333
+      --restlisten=0.0.0.0:8080
+      --rpclisten=0.0.0.0:10009
+      --listen=0.0.0.0:9735
+      --externalip=lightning-node:9735
+      --noseedbackup
+      --debuglevel=info
+    ports:
+      - "8080:8080"   # REST API
+      - "10009:10009" # gRPC
+      - "9735:9735"   # P2P
+    volumes:
+      - lightning_data:/data
+      - lightning_logs:/logs
+    networks:
+      - diagnochain-network
+    environment:
+      - LND_DIR=/data
+    healthcheck:
+      test: ["CMD-SHELL", "lncli --rpcserver=localhost:10009 getinfo || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  # ================================
+  # IPFS Services
+  # ================================
+
+  ipfs-node:
+    image: ipfs/kubo:v0.22.0
+    container_name: diagnochain-ipfs
+    restart: unless-stopped
+    ports:
+      - "5001:5001"  # API
+      - "8080:8080"  # Gateway
+      - "4001:4001"  # P2P
+    volumes:
+      - ipfs_data:/data/ipfs
+      - ipfs_staging:/export
+    networks:
+      - diagnochain-network
+    environment:
+      - IPFS_PROFILE=server
+    command: >
+      sh -c "
+        ipfs config --json API.HTTPHeaders.Access-Control-Allow-Origin '[\"*\"]' &&
+        ipfs config --json API.HTTPHeaders.Access-Control-Allow-Methods '[\"GET\", \"POST\"]' &&
+        ipfs config --json Addresses.Gateway '/ip4/0.0.0.0/tcp/8080' &&
+        ipfs daemon --migrate=true
+      "
+
+  # ================================
+  # Application Services  
+  # ================================
+
+  # DiagnoChain Backend
+  backend:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile
+      target: dev
+    container_name: diagnochain-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      hardhat-node:
+        condition: service_started
+      ipfs-node:
+        condition: service_started
+    volumes:
+      - ../../backend:/app/backend
+      - ../../bitcoin:/app/bitcoin
+      - ../../config:/app/config
+      - ../../database:/app/database
+      - ../../scripts:/app/scripts
+      - backend_logs:/app/logs
+      - backend_uploads:/app/uploads
+      - node_modules_backend:/app/node_modules
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=diagnochain_dev
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - DB_SSL=false
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=password
+      - WEB3_PROVIDER_URL=http://hardhat-node:8545
+      - BTC_NETWORK=testnet
+      - LIGHTNING_ENABLED=true
+      - LIGHTNING_ENDPOINT=http://lightning-node:8080
+      - IPFS_PROVIDER=local
+      - LOCAL_IPFS_URL=http://ipfs-node:5001
+      - JWT_SECRET=dev-secret-change-in-production
+      - LOG_LEVEL=debug
+    networks:
+      - diagnochain-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # DiagnoChain Frontend (Development)
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile.dev
+    container_name: diagnochain-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ../../frontend/src:/app/src
+      - ../../frontend/public:/app/public
+      - node_modules_frontend:/app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:3001
+      - REACT_APP_WS_URL=ws://localhost:3001
+      - REACT_APP_NETWORK=localhost
+      - REACT_APP_CHAIN_ID=1337
+      - GENERATE_SOURCEMAP=true
+      - FAST_REFRESH=true
+    networks:
+      - diagnochain-network
+    stdin_open: true
+    tty: true
+
+  # ================================
+  # Monitoring and Observability
+  # ================================
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: diagnochain-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    volumes:
+      - prometheus_data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    networks:
+      - diagnochain-network
+    depends_on:
+      - backend
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: diagnochain-grafana
+    restart: unless-stopped
+    ports:
+      - "3003:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_DATABASE_TYPE=postgres
+      - GF_DATABASE_HOST=postgres:5432
+      - GF_DATABASE_NAME=grafana
+      - GF_DATABASE_USER=postgres
+      - GF_DATABASE_PASSWORD=password
+      - GF_DATABASE_SSL_MODE=disable
+      - GF_SESSION_PROVIDER=redis
+      - GF_SESSION_PROVIDER_CONFIG=addr=redis:6379,pool_size=100,db=grafana
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-worldmap-panel,grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - diagnochain-network
+    depends_on:
+      - postgres
+      - prometheus
+
+  # AlertManager
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: diagnochain-alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+      - '--cluster.listen-address='
+    volumes:
+      - alertmanager_data:/alertmanager
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - diagnochain-network
+
+  # Loki for log aggregation
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: diagnochain-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+      - ./monitoring/loki.yml:/etc/loki/local-config.yaml:ro
+    networks:
+      - diagnochain-network
+
+  # Promtail for log shipping
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: diagnochain-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./monitoring/promtail.yml:/etc/promtail/config.yml:ro
+      - backend_logs:/var/log/diagnochain:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    networks:
+      - diagnochain-network
+    depends_on:
+      - loki
+
+  # ================================
+  # Development Tools
+  # ================================
+
+  # PostgreSQL Admin Interface
+  pgadmin:
+    image: dpage/pgadmin4:7.5
+    container_name: diagnochain-pgadmin
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@diagnochain.local
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - diagnochain-network
+    depends_on:
+      - postgres
+
+  # Redis Commander
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: diagnochain-redis-commander
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:password
+    networks:
+      - diagnochain-network
+    depends_on:
+      - redis
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: diagnochain-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    networks:
+      - diagnochain-network
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ================================
+  # Exporters for Metrics
+  # ================================
+
+  # PostgreSQL Exporter
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.13.2
+    container_name: diagnochain-postgres-exporter
+    restart: unless-stopped
+    ports:
+      - "9187:9187"
+    environment:
+      - DATA_SOURCE_NAME=postgresql://postgres:password@postgres:5432/diagnochain_dev?sslmode=disable
+      - PG_EXPORTER_EXTEND_QUERY_PATH=/etc/postgres_exporter/queries.yml
+    volumes:
+      - ./monitoring/postgres-queries.yml:/etc/postgres_exporter/queries.yml:ro
+    networks:
+      - diagnochain-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Redis Exporter
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.54.0
+    container_name: diagnochain-redis-exporter
+    restart: unless-stopped
+    ports:
+      - "9121:9121"
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=password
+    networks:
+      - diagnochain-network
+    depends_on:
+      - redis
+
+  # Node Exporter for system metrics
+  node-exporter:
+    image: prom/node-exporter:v1.6.1
+    container_name: diagnochain-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - diagnochain-network
+
+  # ================================
+  # Development Utilities
+  # ================================
+
+  # Mail server for testing email notifications
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: diagnochain-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    networks:
+      - diagnochain-network
+
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:RELEASE.2023-09-04T19-57-37Z
+    container_name: diagnochain-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+      - MINIO_BROWSER_REDIRECT_URL=http://localhost:9001
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - diagnochain-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Ethereum block explorer (for local development)
+  blockscout:
+    image: blockscout/blockscout:5.2.3
+    container_name: diagnochain-blockscout
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - ETHEREUM_JSONRPC_VARIANT=geth
+      - ETHEREUM_JSONRPC_HTTP_URL=http://hardhat-node:8545
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/blockscout
+      - ECTO_USE_SSL=false
+      - SECRET_KEY_BASE=56NtB48ear7+wMSf0IQuWDAAazhpb31qyc7GiyspBP2vh7t5zlCsF5QDv76chXeN
+      - PORT=4000
+      - DISABLE_WEBAPP=false
+    networks:
+      - diagnochain-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hardhat-node:
+        condition: service_started
+
+  # ================================
+  # Load Testing and Performance
+  # ================================
+
+  # Artillery for load testing
+  artillery:
+    image: node:18-alpine
+    container_name: diagnochain-artillery
+    restart: "no"
+    working_dir: /app
+    command: >
+      sh -c "
+        npm install -g artillery@latest &&
+        echo 'Artillery installed. Run: docker-compose exec artillery artillery run /tests/load-test.yml'
+      "
+    volumes:
+      - ./load-tests:/tests:ro
+      - artillery_reports:/app/reports
+    networks:
+      - diagnochain-network
+    profiles:
+      - testing
+
+  # k6 for performance testing
+  k6:
+    image: grafana/k6:latest
+    container_name: diagnochain-k6
+    restart: "no"
+    volumes:
+      - ./performance-tests:/scripts:ro
+      - k6_results:/results
+    networks:
+      - diagnochain-network
+    profiles:
+      - testing
+
+  # ================================
+  # Security and Testing
+  # ================================
+
+  # OWASP ZAP for security testing
+  zap:
+    image: owasp/zap2docker-stable:2.14.0
+    container_name: diagnochain-zap
+    restart: "no"
+    ports:
+      - "8090:8090"
+    command: zap-baseline.py -t http://nginx -J zap-report.json
+    volumes:
+      - zap_reports:/zap/wrk/reports
+    networks:
+      - diagnochain-network
+    profiles:
+      - security-testing
+
+  # Vulnerability scanner
+  trivy:
+    image: aquasec/trivy:latest
+    container_name: diagnochain-trivy
+    restart: "no"
+    command: >
+      sh -c "
+        echo 'Trivy scanner ready. Usage examples:'
+        echo 'docker-compose exec trivy trivy image diagnochain:latest'
+        echo 'docker-compose exec trivy trivy fs /app'
+      "
+    volumes:
+      - ../..:/app:ro
+      - trivy_cache:/root/.cache/trivy
+    networks:
+      - diagnochain-network
+    profiles:
+      - security-testing
+
+# ================================
+# Networks
+# ================================
+
+networks:
+  diagnochain-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ================================
+# Volumes
+# ================================
+
+volumes:
+  # Database volumes
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+  # Blockchain volumes
+  bitcoin_data:
+    driver: local
+  lightning_data:
+    driver: local
+  lightning_logs:
+    driver: local
+  hardhat_data:
+    driver: local
+
+  # IPFS volumes
+  ipfs_data:
+    driver: local
+  ipfs_staging:
+    driver: local
+
+  # Application volumes
+  backend_logs:
+    driver: local
+  backend_uploads:
+    driver: local
+  node_modules_backend:
+    driver: local
+  node_modules_frontend:
+    driver: local
+
+  # Monitoring volumes
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  alertmanager_data:
+    driver: local
+  loki_data:
+    driver: local
+
+  # Development tool volumes
+  pgadmin_data:
+    driver: local
+  nginx_logs:
+    driver: local
+  minio_data:
+    driver: local
+
+  # Testing volumes
+  artillery_reports:
+    driver: local
+  k6_results:
+    driver: local
+  zap_reports:
+    driver: local
+  trivy_cache:
+    driver: local
+
+# ================================
+# Development Profiles
+# ================================
+
+# Usage examples:
+# docker-compose up -d                              # Start core services
+# docker-compose --profile testing up -d            # Include testing tools
+# docker-compose --profile security-testing up -d   # Include security tools
+# docker-compose --profile monitoring up -d         # Include full monitoring stack
+
+# Useful commands:
+# docker-compose logs -f backend                    # Follow backend logs
+# docker-compose exec postgres psql -U postgres -d diagnochain_dev  # Connect to database
+# docker-compose exec redis redis-cli -a password   # Connect to Redis
+# docker-compose exec backend npm test              # Run backend tests
+# docker-compose exec lightning-node lncli getinfo # Check Lightning node
+# docker-compose restart backend                    # Restart backend service

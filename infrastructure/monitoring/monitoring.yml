@@ -1,0 +1,1543 @@
+# DiagnoChain Monitoring and Observability Stack
+# Prometheus, Grafana, AlertManager, and ELK Stack
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+
+---
+# Prometheus Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'diagnochain'
+        environment: 'production'
+
+    rule_files:
+      - "alert_rules.yml"
+      - "recording_rules.yml"
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager:9093']
+
+    scrape_configs:
+      # DiagnoChain Backend
+      - job_name: 'diagnochain-backend'
+        static_configs:
+          - targets: ['diagnochain-backend-service.diagnochain:3001']
+        metrics_path: /metrics
+        scrape_interval: 30s
+        scrape_timeout: 10s
+        params:
+          format: ['prometheus']
+
+      # DiagnoChain Bitcoin Services
+      - job_name: 'diagnochain-bitcoin'
+        static_configs:
+          - targets: ['diagnochain-bitcoin-service.diagnochain:3002']
+        metrics_path: /metrics
+        scrape_interval: 30s
+
+      # PostgreSQL Exporter
+      - job_name: 'postgres'
+        static_configs:
+          - targets: ['postgres-exporter:9187']
+        scrape_interval: 30s
+
+      # Redis Exporter
+      - job_name: 'redis'
+        static_configs:
+          - targets: ['redis-exporter:9121']
+        scrape_interval: 30s
+
+      # Node Exporter for system metrics
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__address__]
+            regex: '(.*):10250'
+            target_label: __address__
+            replacement: '${1}:9100'
+
+      # Kubernetes API Server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: ['default']
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: default;kubernetes;https
+
+      # Lightning Network Node (if enabled)
+      - job_name: 'lightning-node'
+        static_configs:
+          - targets: ['lightning-service.diagnochain:8080']
+        metrics_path: /metrics
+        scrape_interval: 60s
+
+  alert_rules.yml: |
+    groups:
+    - name: diagnochain.rules
+      rules:
+      # Application Health Alerts
+      - alert: DiagnoChainBackendDown
+        expr: up{job="diagnochain-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: "DiagnoChain backend service is down"
+          description: "Backend service has been down for more than 1 minute"
+
+      - alert: DiagnoChainHighErrorRate
+        expr: rate(http_requests_total{job="diagnochain-backend",code=~"5.."}[5m]) / rate(http_requests_total{job="diagnochain-backend"}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+
+      - alert: DiagnoChainSlowResponse
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="diagnochain-backend"}[5m])) > 2
+        for: 3m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "Slow response times detected"
+          description: "95th percentile response time is {{ $value }}s"
+
+      # Database Alerts
+      - alert: DatabaseDown
+        expr: up{job="postgres"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "PostgreSQL database is down"
+          description: "Database connection failed"
+
+      - alert: DatabaseHighConnections
+        expr: pg_stat_database_numbackends{datname="diagnochain"} > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database connection count"
+          description: "Database has {{ $value }} active connections"
+
+      - alert: DatabaseSlowQueries
+        expr: rate(pg_stat_database_tup_returned{datname="diagnochain"}[5m]) / rate(pg_stat_database_tup_fetched{datname="diagnochain"}[5m]) < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Database performance degradation"
+          description: "Query efficiency has dropped to {{ $value | humanizePercentage }}"
+
+      # Redis Alerts
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Redis connection failed"
+
+      - alert: RedisHighMemoryUsage
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis high memory usage"
+          description: "Redis memory usage is {{ $value | humanizePercentage }}"
+
+      # Bitcoin Service Alerts
+      - alert: BitcoinServiceDown
+        expr: up{job="diagnochain-bitcoin"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: bitcoin
+        annotations:
+          summary: "Bitcoin service is down"
+          description: "Bitcoin payment processing service is not responding"
+
+      - alert: LightningNodeDown
+        expr: up{job="lightning-node"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: lightning
+        annotations:
+          summary: "Lightning Network node is down"
+          description: "Lightning payments may fail, will fallback to on-chain"
+
+      # System Resource Alerts
+      - alert: HighCPUUsage
+        expr: (100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)) > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}%"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: system
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}"
+          description: "Disk space is {{ $value | humanizePercentage }} full"
+
+      # Business Logic Alerts
+      - alert: ConsultationBacklog
+        expr: diagnochain_pending_consultations > 20
+        for: 10m
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "High consultation backlog"
+          description: "{{ $value }} consultations are pending"
+
+      - alert: PaymentFailures
+        expr: rate(diagnochain_payment_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: payments
+        annotations:
+          summary: "Payment failure rate is high"
+          description: "Payment failure rate is {{ $value | humanizePercentage }}"
+
+  recording_rules.yml: |
+    groups:
+    - name: diagnochain.recording
+      interval: 30s
+      rules:
+      # API Performance Recording Rules
+      - record: diagnochain:http_request_rate5m
+        expr: rate(http_requests_total{job="diagnochain-backend"}[5m])
+
+      - record: diagnochain:http_error_rate5m
+        expr: rate(http_requests_total{job="diagnochain-backend",code=~"5.."}[5m]) / rate(http_requests_total{job="diagnochain-backend"}[5m])
+
+      - record: diagnochain:http_response_time_p95
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="diagnochain-backend"}[5m]))
+
+      # Business Metrics Recording Rules
+      - record: diagnochain:consultations_created_rate
+        expr: rate(diagnochain_consultations_total{status="created"}[5m])
+
+      - record: diagnochain:consultations_completed_rate
+        expr: rate(diagnochain_consultations_total{status="completed"}[5m])
+
+      - record: diagnochain:revenue_rate_eth
+        expr: rate(diagnochain_revenue_eth_total[5m])
+
+      - record: diagnochain:revenue_rate_btc
+        expr: rate(diagnochain_revenue_btc_total[5m])
+
+---
+# Prometheus Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.47.0
+        ports:
+        - containerPort: 9090
+        args:
+          - --config.file=/etc/prometheus/prometheus.yml
+          - --storage.tsdb.path=/prometheus/
+          - --web.console.libraries=/etc/prometheus/console_libraries
+          - --web.console.templates=/etc/prometheus/consoles
+          - --web.enable-lifecycle
+          - --storage.tsdb.retention.time=30d
+          - --storage.tsdb.retention.size=50GB
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
+        - name: prometheus-storage
+          mountPath: /prometheus
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 1000m
+          limits:
+            memory: 4Gi
+            cpu: 2000m
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 5
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: prometheus-config
+      - name: prometheus-storage
+        persistentVolumeClaim:
+          claimName: prometheus-pvc
+
+---
+# Grafana Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: monitoring
+data:
+  grafana.ini: |
+    [server]
+    http_port = 3000
+    domain = grafana.diagnochain.com
+    root_url = https://grafana.diagnochain.com
+
+    [security]
+    admin_user = admin
+    admin_password = ${GF_SECURITY_ADMIN_PASSWORD}
+    secret_key = ${GF_SECURITY_SECRET_KEY}
+
+    [auth]
+    disable_login_form = false
+    oauth_auto_login = false
+
+    [auth.github]
+    enabled = true
+    allow_sign_up = true
+    client_id = ${GF_AUTH_GITHUB_CLIENT_ID}
+    client_secret = ${GF_AUTH_GITHUB_CLIENT_SECRET}
+    scopes = user:email,read:org
+    auth_url = https://github.com/login/oauth/authorize
+    token_url = https://github.com/login/oauth/access_token
+    api_url = https://api.github.com/user
+    allowed_organizations = diagnochain
+
+    [database]
+    type = postgres
+    host = postgres-service.diagnochain:5432
+    name = grafana
+    user = grafana
+    password = ${GF_DATABASE_PASSWORD}
+    ssl_mode = require
+
+    [session]
+    provider = redis
+    provider_config = addr=redis-service.diagnochain:6379,pool_size=100,db=grafana
+
+    [alerting]
+    enabled = true
+    execute_alerts = true
+
+  datasources.yml: |
+    apiVersion: 1
+    datasources:
+    - name: Prometheus
+      type: prometheus
+      access: proxy
+      url: http://prometheus:9090
+      isDefault: true
+      editable: false
+
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki:3100
+      editable: false
+
+    - name: PostgreSQL
+      type: postgres
+      url: postgres-service.diagnochain:5432
+      database: diagnochain
+      user: grafana_readonly
+      secureJsonData:
+        password: ${GF_DATABASE_READONLY_PASSWORD}
+      jsonData:
+        sslmode: require
+        postgresVersion: 1500
+
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+    - name: 'DiagnoChain Dashboards'
+      org_id: 1
+      folder: 'DiagnoChain'
+      type: file
+      disableDeletion: false
+      editable: true
+      options:
+        path: /var/lib/grafana/dashboards
+
+  diagnochain-overview.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "DiagnoChain Overview",
+        "description": "Main dashboard for DiagnoChain platform monitoring",
+        "tags": ["diagnochain", "overview"],
+        "timezone": "UTC",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Active Consultations",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "diagnochain_consultations_active",
+                "legendFormat": "Active"
+              }
+            ],
+            "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0}
+          },
+          {
+            "id": 2,
+            "title": "Total Revenue (ETH)",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "diagnochain_revenue_eth_total",
+                "legendFormat": "ETH"
+              }
+            ],
+            "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0}
+          },
+          {
+            "id": 3,
+            "title": "Bitcoin Payments (BTC)",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "diagnochain_revenue_btc_total",
+                "legendFormat": "BTC"
+              }
+            ],
+            "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0}
+          },
+          {
+            "id": 4,
+            "title": "API Response Times",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "diagnochain:http_response_time_p95",
+                "legendFormat": "95th percentile"
+              },
+              {
+                "expr": "diagnochain:http_response_time_p50",
+                "legendFormat": "Median"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6}
+          },
+          {
+            "id": 5,
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "diagnochain:http_error_rate5m",
+                "legendFormat": "Error Rate"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6}
+          }
+        ],
+        "time": {
+          "from": "now-6h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+---
+# Grafana Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      serviceAccountName: grafana
+      containers:
+      - name: grafana
+        image: grafana/grafana:10.1.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-secrets
+              key: admin-password
+        - name: GF_SECURITY_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: grafana-secrets
+              key: secret-key
+        - name: GF_DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-secrets
+              key: database-password
+        volumeMounts:
+        - name: grafana-config
+          mountPath: /etc/grafana
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        - name: grafana-dashboards
+          mountPath: /var/lib/grafana/dashboards
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 250m
+          limits:
+            memory: 1Gi
+            cpu: 500m
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: grafana-config
+        configMap:
+          name: grafana-config
+      - name: grafana-storage
+        persistentVolumeClaim:
+          claimName: grafana-pvc
+      - name: grafana-dashboards
+        configMap:
+          name: grafana-dashboards
+
+---
+# AlertManager Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'alerts@diagnochain.com'
+      smtp_auth_username: 'alerts@diagnochain.com'
+      smtp_auth_password: '${SMTP_PASSWORD}'
+
+    route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 12h
+      receiver: 'default'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+        group_wait: 10s
+        repeat_interval: 5m
+      - match:
+          severity: warning
+        receiver: 'warning-alerts'
+        repeat_interval: 30m
+
+    receivers:
+    - name: 'default'
+      email_configs:
+      - to: 'team@diagnochain.com'
+        subject: 'DiagnoChain Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}: {{ .Value }} {{ end }}
+          {{ end }}
+
+    - name: 'critical-alerts'
+      email_configs:
+      - to: 'oncall@diagnochain.com'
+        subject: '🚨 CRITICAL: DiagnoChain {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          🚨 CRITICAL ALERT 🚨
+          
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Service: {{ .Labels.service }}
+          Severity: {{ .Labels.severity }}
+          Started: {{ .StartsAt }}
+          
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}: {{ .Value }} {{ end }}
+          {{ end }}
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#diagnochain-alerts'
+        title: '🚨 Critical Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Service:* {{ .Labels.service }}
+          *Started:* {{ .StartsAt }}
+          {{ end }}
+
+    - name: 'warning-alerts'
+      email_configs:
+      - to: 'team@diagnochain.com'
+        subject: '⚠️  Warning: DiagnoChain {{ .GroupLabels.alertname }}'
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#diagnochain-warnings'
+        title: '⚠️  {{ .GroupLabels.alertname }}'
+
+    inhibit_rules:
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'instance']
+
+---
+# Loki for Log Aggregation
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: monitoring
+data:
+  loki.yml: |
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+
+    common:
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: inmemory
+
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v11
+          index:
+            prefix: index_
+            period: 24h
+
+    ruler:
+      alertmanager_url: http://alertmanager:9093
+
+    limits_config:
+      enforce_metric_name: false
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      max_query_length: 12000h
+      max_query_parallelism: 16
+
+---
+# Promtail for Log Collection
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: monitoring
+data:
+  promtail.yml: |
+    server:
+      http_listen_port: 3101
+      grpc_listen_port: 0
+
+    positions:
+      filename: /tmp/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+    - job_name: kubernetes-pods
+      kubernetes_sd_configs:
+        - role: pod
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+      pipeline_stages:
+        - cri: {}
+        - json:
+            expressions:
+              timestamp: timestamp
+              level: level
+              message: message
+              service: service
+        - timestamp:
+            source: timestamp
+            format: RFC3339Nano
+        - labels:
+            level:
+            service:
+
+    - job_name: diagnochain-logs
+      static_configs:
+        - targets:
+            - localhost
+          labels:
+            job: diagnochain-logs
+            __path__: /var/log/diagnochain/*.log
+      pipeline_stages:
+        - json:
+            expressions:
+              timestamp: timestamp
+              level: level
+              message: message
+              service: service
+              userId: userId
+              consultationId: consultationId
+        - timestamp:
+            source: timestamp
+            format: RFC3339
+        - labels:
+            level:
+            service:
+            userId:
+
+---
+# ElasticSearch for Advanced Log Analytics
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: monitoring
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      containers:
+      - name: elasticsearch
+        image: elasticsearch:8.9.0
+        ports:
+        - containerPort: 9200
+        - containerPort: 9300
+        env:
+        - name: discovery.type
+          value: single-node
+        - name: ES_JAVA_OPTS
+          value: "-Xms1g -Xmx1g"
+        - name: xpack.security.enabled
+          value: "true"
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-secrets
+              key: password
+        volumeMounts:
+        - name: elasticsearch-data
+          mountPath: /usr/share/elasticsearch/data
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 1000m
+          limits:
+            memory: 4Gi
+            cpu: 2000m
+        livenessProbe:
+          httpGet:
+            path: /_cluster/health
+            port: 9200
+            httpHeaders:
+            - name: Authorization
+              value: "Basic ZWxhc3RpYzpjaGFuZ2VtZQ=="
+          initialDelaySeconds: 60
+          periodSeconds: 30
+  volumeClaimTemplates:
+  - metadata:
+      name: elasticsearch-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 50Gi
+      storageClassName: gp3
+
+---
+# Kibana for Log Visualization
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: kibana:8.9.0
+        ports:
+        - containerPort: 5601
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "http://elasticsearch:9200"
+        - name: ELASTICSEARCH_USERNAME
+          value: "kibana_system"
+        - name: ELASTICSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-secrets
+              key: kibana-password
+        resources:
+          requests:
+            memory: 1Gi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 1000m
+        livenessProbe:
+          httpGet:
+            path: /api/status
+            port: 5601
+          initialDelaySeconds: 60
+          periodSeconds: 30
+
+---
+# Jaeger for Distributed Tracing
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:1.49
+        ports:
+        - containerPort: 16686  # UI
+        - containerPort: 14250  # gRPC
+        - containerPort: 14268  # HTTP
+        - containerPort: 6831   # UDP
+        env:
+        - name: COLLECTOR_ZIPKIN_HOST_PORT
+          value: ":9411"
+        - name: SPAN_STORAGE_TYPE
+          value: "elasticsearch"
+        - name: ES_SERVER_URLS
+          value: "http://elasticsearch:9200"
+        - name: ES_USERNAME
+          value: "elastic"
+        - name: ES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-secrets
+              key: password
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 250m
+          limits:
+            memory: 1Gi
+            cpu: 500m
+
+---
+# Services for monitoring stack
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+spec:
+  selector:
+    app: alertmanager
+  ports:
+  - port: 9093
+    targetPort: 9093
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: monitoring
+spec:
+  selector:
+    app: loki
+  ports:
+  - port: 3100
+    targetPort: 3100
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: monitoring
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+  - port: 9200
+    targetPort: 9200
+    name: http
+  - port: 9300
+    targetPort: 9300
+    name: transport
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: monitoring
+spec:
+  selector:
+    app: kibana
+  ports:
+  - port: 5601
+    targetPort: 5601
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: monitoring
+spec:
+  selector:
+    app: jaeger
+  ports:
+  - port: 16686
+    targetPort: 16686
+    name: ui
+  - port: 14250
+    targetPort: 14250
+    name: grpc
+  - port: 14268
+    targetPort: 14268
+    name: http
+
+---
+# Persistent Volume Claims
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: gp3
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: gp3
+
+---
+# Custom Metrics Server for DiagnoChain
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diagnochain-metrics-collector
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: diagnochain-metrics-collector
+  template:
+    metadata:
+      labels:
+        app: diagnochain-metrics-collector
+    spec:
+      containers:
+      - name: metrics-collector
+        image: diagnochain:latest
+        command: ["node", "scripts/monitoring/metricsCollector.js"]
+        ports:
+        - containerPort: 9464
+          name: metrics
+        env:
+        - name: METRICS_PORT
+          value: "9464"
+        - name: COLLECTION_INTERVAL
+          value: "30000"
+        envFrom:
+        - configMapRef:
+            name: diagnochain-config
+        - secretRef:
+            name: diagnochain-secrets
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 9464
+          initialDelaySeconds: 30
+          periodSeconds: 30
+
+---
+# ServiceMonitor for custom metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: diagnochain-metrics
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: diagnochain-metrics-collector
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+# Log Shipping Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: monitoring
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag diagnochain.*
+      format json
+      time_format %Y-%m-%dT%H:%M:%S.%NZ
+    </source>
+
+    <filter diagnochain.**>
+      @type record_transformer
+      <record>
+        hostname ${hostname}
+        environment production
+        cluster diagnochain
+      </record>
+    </filter>
+
+    <match diagnochain.backend.**>
+      @type elasticsearch
+      host elasticsearch
+      port 9200
+      index_name diagnochain-backend-logs
+      type_name _doc
+      user elastic
+      password ${ELASTICSEARCH_PASSWORD}
+      
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/backend.buffer
+        flush_interval 5s
+        retry_forever true
+      </buffer>
+    </match>
+
+    <match diagnochain.bitcoin.**>
+      @type elasticsearch
+      host elasticsearch
+      port 9200
+      index_name diagnochain-bitcoin-logs
+      type_name _doc
+      user elastic
+      password ${ELASTICSEARCH_PASSWORD}
+      
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/bitcoin.buffer
+        flush_interval 5s
+      </buffer>
+    </match>
+
+---
+# Uptime Monitoring
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackbox-config
+  namespace: monitoring
+data:
+  blackbox.yml: |
+    modules:
+      http_2xx:
+        prober: http
+        timeout: 5s
+        http:
+          method: GET
+          valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+          valid_status_codes: [200]
+          protocol: "tcp"
+
+      http_api:
+        prober: http
+        timeout: 10s
+        http:
+          method: GET
+          headers:
+            Authorization: "Bearer ${MONITORING_TOKEN}"
+          valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+          valid_status_codes: [200]
+
+      tcp_connect:
+        prober: tcp
+        timeout: 5s
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackbox-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blackbox-exporter
+  template:
+    metadata:
+      labels:
+        app: blackbox-exporter
+    spec:
+      containers:
+      - name: blackbox-exporter
+        image: prom/blackbox-exporter:v0.24.0
+        ports:
+        - containerPort: 9115
+        args:
+          - --config.file=/config/blackbox.yml
+        volumeMounts:
+        - name: config
+          mountPath: /config
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 128Mi
+            cpu: 100m
+      volumes:
+      - name: config
+        configMap:
+          name: blackbox-config
+
+---
+# Network monitoring for Bitcoin services
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bitcoin-monitoring-config
+  namespace: monitoring
+data:
+  bitcoin-monitor.py: |
+    #!/usr/bin/env python3
+    import time
+    import json
+    import requests
+    from prometheus_client import start_http_server, Gauge, Counter
+
+    # Metrics
+    bitcoin_block_height = Gauge('bitcoin_block_height', 'Current Bitcoin block height')
+    bitcoin_peer_count = Gauge('bitcoin_peer_count', 'Number of Bitcoin peers')
+    lightning_channels = Gauge('lightning_channels_active', 'Active Lightning channels')
+    lightning_balance = Gauge('lightning_balance_sats', 'Lightning channel balance in sats')
+
+    payment_successes = Counter('diagnochain_payments_success_total', 'Successful payments')
+    payment_failures = Counter('diagnochain_payments_failed_total', 'Failed payments')
+
+    def collect_bitcoin_metrics():
+        try:
+            # Bitcoin node metrics
+            bitcoin_info = requests.get('http://bitcoin-node:8332/rest/getblockchaininfo.json').json()
+            bitcoin_block_height.set(bitcoin_info['blocks'])
+            
+            network_info = requests.get('http://bitcoin-node:8332/rest/getnetworkinfo.json').json()
+            bitcoin_peer_count.set(network_info['connections'])
+            
+        except Exception as e:
+            print(f"Error collecting Bitcoin metrics: {e}")
+
+        try:
+            # Lightning node metrics
+            lightning_info = requests.get('http://lightning-service:8080/v1/getinfo').json()
+            lightning_channels.set(lightning_info['num_active_channels'])
+            
+            balance_info = requests.get('http://lightning-service:8080/v1/balance/channels').json()
+            lightning_balance.set(int(balance_info['balance']))
+            
+        except Exception as e:
+            print(f"Error collecting Lightning metrics: {e}")
+
+    if __name__ == '__main__':
+        start_http_server(8000)
+        while True:
+            collect_bitcoin_metrics()
+            time.sleep(30)
+
+---
+# Secrets for monitoring services
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-secrets
+  namespace: monitoring
+type: Opaque
+stringData:
+  admin-password: your-secure-grafana-password
+  secret-key: your-grafana-secret-key-32-chars-long
+  database-password: your-grafana-db-password
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: elasticsearch-secrets
+  namespace: monitoring
+type: Opaque
+stringData:
+  password: your-elasticsearch-password
+  kibana-password: your-kibana-password
+
+---
+# Service Accounts and RBAC
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/proxy", "services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: monitoring
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grafana
+  namespace: monitoring
+
+---
+# Ingress for monitoring services
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitoring-ingress
+  namespace: monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: monitoring-auth
+    nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required - DiagnoChain Monitoring'
+spec:
+  tls:
+  - hosts:
+    - grafana.diagnochain.com
+    - prometheus.diagnochain.com
+    secretName: monitoring-tls
+  rules:
+  - host: grafana.diagnochain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 3000
+  - host: prometheus.diagnochain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: prometheus
+            port:
+              number: 9090
+  - host: kibana.diagnochain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: kibana
+            port:
+              number: 5601
+
+---
+# Basic auth secret for monitoring access
+apiVersion: v1
+kind: Secret
+metadata:
+  name: monitoring-auth
+  namespace: monitoring
+type: Opaque
+data:
+  auth: YWRtaW46JGFwcjEkSDY1dnVnY3okQUdtUHE0bWZnWW4vVGRBeHVHM1BhLw== # admin:monitoring
+
+---
+# Health Check CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: health-check
+  namespace: monitoring
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: health-checker
+            image: curlimages/curl:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Running health checks..."
+              
+              # Check main application
+              curl -f http://diagnochain-backend-service.diagnochain:3001/health || exit 1
+              
+              # Check Bitcoin services
+              curl -f http://diagnochain-bitcoin-service.diagnochain:3002/health || exit 1
+              
+              # Check database connectivity
+              nc -z postgres-service.diagnochain 5432 || exit 1
+              
+              # Check Redis
+              nc -z redis-service.diagnochain 6379 || exit 1
+              
+              echo "All health checks passed"
+            resources:
+              requests:
+                memory: 64Mi
+                cpu: 50m
+              limits:
+                memory: 128Mi
+                cpu: 100m
+          restartPolicy: OnFailure
+
+---
+# Performance Testing CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: performance-test
+  namespace: monitoring
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: performance-tester
+            image: diagnochain:latest
+            command:
+            - node
+            - scripts/monitoring/performanceTest.js
+            env:
+            - name: TARGET_URL
+              value: "http://diagnochain-backend-service.diagnochain:3001"
+            - name: TEST_DURATION
+              value: "300000"  # 5 minutes
+            - name: CONCURRENT_USERS
+              value: "10"
+            resources:
+              requests:
+                memory: 256Mi
+                cpu: 200m
+              limits:
+                memory: 512Mi
+                cpu: 500m
+          restartPolicy: OnFailure

@@ -1,0 +1,1225 @@
+# DiagnoChain Kubernetes Deployment Configuration
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: diagnochain
+  labels:
+    name: diagnochain
+    environment: production
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diagnochain-config
+  namespace: diagnochain
+data:
+  NODE_ENV: "production"
+  PORT: "3001"
+  HOST: "0.0.0.0"
+  
+  # Database configuration
+  DB_HOST: "postgres-service"
+  DB_PORT: "5432"
+  DB_NAME: "diagnochain"
+  DB_SSL: "true"
+  DB_POOL_MIN: "5"
+  DB_POOL_MAX: "50"
+  
+  # Redis configuration
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_ENABLED: "true"
+  
+  # Blockchain configuration
+  ETH_NETWORK: "sepolia"
+  BTC_NETWORK: "testnet"
+  GAS_LIMIT: "8000000"
+  CONFIRMATION_BLOCKS: "3"
+  
+  # Bitcoin services
+  LIGHTNING_ENABLED: "true"
+  LIGHTNING_ENDPOINT: "http://lightning-service:8080"
+  
+  # IPFS configuration
+  IPFS_PROVIDER: "pinata"
+  IPFS_GATEWAY: "https://gateway.pinata.cloud/ipfs"
+  
+  # Feature flags
+  FEATURE_SECOND_OPINIONS: "true"
+  FEATURE_DAILY_REWARDS: "true"
+  
+  # Monitoring
+  METRICS_ENABLED: "true"
+  HEALTH_CHECK_INTERVAL: "30000"
+
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: diagnochain-secrets
+  namespace: diagnochain
+type: Opaque
+stringData:
+  # Database credentials
+  DB_USER: postgres
+  DB_PASSWORD: your-secure-db-password
+  
+  # JWT and encryption
+  JWT_SECRET: your-super-secure-jwt-secret-key-change-this
+  
+  # Blockchain private keys
+  DEPLOYER_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  ORACLE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  
+  # External API keys
+  WEB3_PROVIDER_URL: "https://sepolia.infura.io/v3/YOUR_INFURA_PROJECT_ID"
+  BLOCKCHAIN_API_KEY: your-blockcypher-api-key
+  PINATA_API_KEY: your-pinata-api-key
+  PINATA_SECRET_KEY: your-pinata-secret-key
+  COINGECKO_API_KEY: your-coingecko-api-key
+  CMC_API_KEY: your-coinmarketcap-api-key
+  
+  # Lightning Network
+  LIGHTNING_MACAROON: your-base64-encoded-macaroon
+  
+  # Redis password
+  REDIS_PASSWORD: your-redis-password
+
+---
+# PostgreSQL Database Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: diagnochain
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: diagnochain-config
+              key: DB_NAME
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: diagnochain-secrets
+              key: DB_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: diagnochain-secrets
+              key: DB_PASSWORD
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-config
+          mountPath: /etc/postgresql/postgresql.conf
+          subPath: postgresql.conf
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -h
+            - localhost
+            - -U
+            - postgres
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -h
+            - localhost
+            - -U
+            - postgres
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: postgres-config
+        configMap:
+          name: postgres-config
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: diagnochain
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - /etc/redis/redis.conf
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: diagnochain-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: redis-config
+          mountPath: /etc/redis
+        - name: redis-storage
+          mountPath: /data
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: redis-pvc
+
+---
+# Main DiagnoChain Backend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diagnochain-backend
+  namespace: diagnochain
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: diagnochain-backend
+  template:
+    metadata:
+      labels:
+        app: diagnochain-backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3001"
+        prometheus.io/path: "/metrics"
+    spec:
+      initContainers:
+      - name: db-migration
+        image: diagnochain:latest
+        command: ["node", "database/migrations/migrations.js"]
+        envFrom:
+        - configMapRef:
+            name: diagnochain-config
+        - secretRef:
+            name: diagnochain-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      containers:
+      - name: backend
+        image: diagnochain:latest
+        ports:
+        - containerPort: 3001
+          name: http
+        envFrom:
+        - configMapRef:
+            name: diagnochain-config
+        - secretRef:
+            name: diagnochain-secrets
+        env:
+        - name: CONTAINER_TYPE
+          value: "backend"
+        volumeMounts:
+        - name: app-storage
+          mountPath: /app/uploads
+        - name: logs-storage
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 30
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: app-storage
+        persistentVolumeClaim:
+          claimName: app-storage-pvc
+      - name: logs-storage
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      restartPolicy: Always
+      serviceAccountName: diagnochain-service-account
+
+---
+# Frontend Nginx Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diagnochain-frontend
+  namespace: diagnochain
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: diagnochain-frontend
+  template:
+    metadata:
+      labels:
+        app: diagnochain-frontend
+    spec:
+      containers:
+      - name: frontend
+        image: diagnochain:nginx-frontend
+        ports:
+        - containerPort: 80
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 101
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+
+---
+# Bitcoin Services Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diagnochain-bitcoin
+  namespace: diagnochain
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: diagnochain-bitcoin
+  template:
+    metadata:
+      labels:
+        app: diagnochain-bitcoin
+    spec:
+      containers:
+      - name: bitcoin-services
+        image: diagnochain:bitcoin-services
+        ports:
+        - containerPort: 3002
+        envFrom:
+        - configMapRef:
+            name: diagnochain-config
+        - secretRef:
+            name: diagnochain-secrets
+        env:
+        - name: SERVICE_TYPE
+          value: "bitcoin"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: diagnochain
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: diagnochain
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: diagnochain-backend-service
+  namespace: diagnochain
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "3001"
+spec:
+  selector:
+    app: diagnochain-backend
+  ports:
+  - port: 3001
+    targetPort: 3001
+    name: http
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: diagnochain-frontend-service
+  namespace: diagnochain
+spec:
+  selector:
+    app: diagnochain-frontend
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: diagnochain-bitcoin-service
+  namespace: diagnochain
+spec:
+  selector:
+    app: diagnochain-bitcoin
+  ports:
+  - port: 3002
+    targetPort: 3002
+    name: http
+  type: ClusterIP
+
+---
+# Persistent Volume Claims
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: diagnochain
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: diagnochain
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-storage-pvc
+  namespace: diagnochain
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: nfs
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logs-pvc
+  namespace: diagnochain
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs
+
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: diagnochain-ingress
+  namespace: diagnochain
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://diagnochain.com"
+spec:
+  tls:
+  - hosts:
+    - api.diagnochain.com
+    - diagnochain.com
+    secretName: diagnochain-tls
+  rules:
+  - host: diagnochain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: diagnochain-frontend-service
+            port:
+              number: 80
+  - host: api.diagnochain.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: diagnochain-backend-service
+            port:
+              number: 3001
+      - path: /btc
+        pathType: Prefix
+        backend:
+          service:
+            name: diagnochain-bitcoin-service
+            port:
+              number: 3002
+
+---
+# HorizontalPodAutoscaler for backend
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: diagnochain-backend-hpa
+  namespace: diagnochain
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: diagnochain-backend
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+
+---
+# NetworkPolicy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: diagnochain-network-policy
+  namespace: diagnochain
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 3001
+    - protocol: TCP
+      port: 80
+  - from:
+    - podSelector:
+        matchLabels:
+          app: diagnochain-backend
+    ports:
+    - protocol: TCP
+      port: 5432  # PostgreSQL
+    - protocol: TCP
+      port: 6379  # Redis
+  egress:
+  - {} # Allow all outbound (for external APIs)
+
+---
+# ServiceAccount with RBAC
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: diagnochain-service-account
+  namespace: diagnochain
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: diagnochain-role
+  namespace: diagnochain
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: diagnochain-role-binding
+  namespace: diagnochain
+subjects:
+- kind: ServiceAccount
+  name: diagnochain-service-account
+  namespace: diagnochain
+roleRef:
+  kind: Role
+  name: diagnochain-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# CronJob for daily maintenance
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: diagnochain-maintenance
+  namespace: diagnochain
+spec:
+  schedule: "0 2 * * *"  # 2 AM daily
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: maintenance
+            image: diagnochain:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting daily maintenance..."
+              node scripts/utilities/cleanupOldData.js
+              node scripts/utilities/optimizeDatabase.js
+              node scripts/utilities/backupDatabase.js
+              echo "Maintenance completed"
+            envFrom:
+            - configMapRef:
+                name: diagnochain-config
+            - secretRef:
+                name: diagnochain-secrets
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+          restartPolicy: OnFailure
+          serviceAccountName: diagnochain-service-account
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+---
+# Job for initial setup
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: diagnochain-setup
+  namespace: diagnochain
+spec:
+  template:
+    spec:
+      containers:
+      - name: setup
+        image: diagnochain:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Running initial setup..."
+          node database/migrations/migrations.js
+          node scripts/deployment/deploy.js deploy
+          echo "Setup completed successfully"
+        envFrom:
+        - configMapRef:
+            name: diagnochain-config
+        - secretRef:
+            name: diagnochain-secrets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+      restartPolicy: OnFailure
+      backoffLimit: 3
+
+---
+# PodDisruptionBudget for high availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: diagnochain-backend-pdb
+  namespace: diagnochain
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: diagnochain-backend
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: diagnochain-frontend-pdb
+  namespace: diagnochain
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: diagnochain-frontend
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: diagnochain-backend-monitor
+  namespace: diagnochain
+  labels:
+    app: diagnochain-backend
+spec:
+  selector:
+    matchLabels:
+      app: diagnochain-backend
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+# ConfigMap for PostgreSQL configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: diagnochain
+data:
+  postgresql.conf: |
+    # PostgreSQL configuration for DiagnoChain
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 200
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    work_mem = 4MB
+    maintenance_work_mem = 64MB
+    
+    # Write-ahead logging
+    wal_level = replica
+    max_wal_size = 1GB
+    min_wal_size = 80MB
+    
+    # Logging
+    logging_collector = on
+    log_destination = 'stderr'
+    log_statement = 'mod'
+    log_min_duration_statement = 1000
+    
+    # Security
+    ssl = on
+    ssl_cert_file = '/etc/ssl/certs/server.crt'
+    ssl_key_file = '/etc/ssl/private/server.key'
+
+---
+# ConfigMap for Redis configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: diagnochain
+data:
+  redis.conf: |
+    # Redis configuration for DiagnoChain
+    bind 0.0.0.0
+    port 6379
+    requirepass ${REDIS_PASSWORD}
+    
+    # Memory management
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+    
+    # Persistence
+    save 900 1
+    save 300 10
+    save 60 10000
+    
+    # Security
+    protected-mode yes
+    tcp-keepalive 300
+    timeout 300
+    
+    # Logging
+    loglevel notice
+    logfile "/var/log/redis/redis.log"
+
+---
+# Secrets for SSL/TLS certificates (to be populated by cert-manager)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: diagnochain-tls
+  namespace: diagnochain
+type: kubernetes.io/tls
+data:
+  tls.crt: ""  # Will be populated by cert-manager
+  tls.key: ""  # Will be populated by cert-manager
+
+---
+# Deployment for Lightning Network node (optional)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightning-node
+  namespace: diagnochain
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lightning-node
+  template:
+    metadata:
+      labels:
+        app: lightning-node
+    spec:
+      containers:
+      - name: lnd
+        image: lightninglabs/lnd:v0.16.4-beta
+        ports:
+        - containerPort: 8080  # REST API
+        - containerPort: 9735  # P2P
+        command:
+        - lnd
+        - --bitcoin.active
+        - --bitcoin.testnet
+        - --bitcoin.node=bitcoind
+        - --restlisten=0.0.0.0:8080
+        - --listen=0.0.0.0:9735
+        - --rpclisten=0.0.0.0:10009
+        volumeMounts:
+        - name: lnd-data
+          mountPath: /data
+        - name: lnd-config
+          mountPath: /etc/lnd
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+      volumes:
+      - name: lnd-data
+        persistentVolumeClaim:
+          claimName: lnd-pvc
+      - name: lnd-config
+        configMap:
+          name: lnd-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightning-service
+  namespace: diagnochain
+spec:
+  selector:
+    app: lightning-node
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: rest
+  - port: 9735
+    targetPort: 9735
+    name: p2p
+  type: ClusterIP
+
+---
+# PersistentVolumeClaim for Lightning node
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lnd-pvc
+  namespace: diagnochain
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ssd
+
+---
+# ConfigMap for Lightning node configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lnd-config
+  namespace: diagnochain
+data:
+  lnd.conf: |
+    [Application Options]
+    listen=0.0.0.0:9735
+    rpclisten=0.0.0.0:10009
+    restlisten=0.0.0.0:8080
+    
+    [Bitcoin]
+    bitcoin.active=true
+    bitcoin.testnet=true
+    bitcoin.node=bitcoind
+    
+    [Bitcoind]
+    bitcoind.rpchost=bitcoind-service:8332
+    bitcoind.rpcuser=bitcoin
+    bitcoind.rpcpass=password
+    bitcoind.zmqpubrawblock=tcp://bitcoind-service:28332
+    bitcoind.zmqpubrawtx=tcp://bitcoind-service:28333
+
+---
+# Monitoring and alerting resources
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: diagnochain
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    
+    scrape_configs:
+    - job_name: 'diagnochain-backend'
+      static_configs:
+      - targets: ['diagnochain-backend-service:3001']
+      metrics_path: /metrics
+      scrape_interval: 30s
+    
+    - job_name: 'diagnochain-bitcoin'
+      static_configs:
+      - targets: ['diagnochain-bitcoin-service:3002']
+      metrics_path: /metrics
+      scrape_interval: 30s
+    
+    - job_name: 'postgres'
+      static_configs:
+      - targets: ['postgres-service:5432']
+    
+    - job_name: 'redis'
+      static_configs:
+      - targets: ['redis-service:6379']
+
+    rule_files:
+    - "alert_rules.yml"
+
+    alerting:
+      alertmanagers:
+      - static_configs:
+        - targets: ['alertmanager:9093']
+
+---
+# Alert rules for monitoring
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+  namespace: diagnochain
+data:
+  alert_rules.yml: |
+    groups:
+    - name: diagnochain-alerts
+      rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is above 10% for 5 minutes"
+      
+      - alert: DatabaseDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database is down"
+          description: "PostgreSQL database is not responding"
+      
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Container memory usage is above 90%"
+      
+      - alert: BitcoinServiceDown
+        expr: up{job="diagnochain-bitcoin"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Bitcoin service is down"
+          description: "Bitcoin payment processing service is not responding"
+
+---
+# Resource quotas for namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: diagnochain-quota
+  namespace: diagnochain
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "16"
+    limits.memory: "32Gi"
+    persistentvolumeclaims: "10"
+    services: "20"
+    secrets: "10"
+    configmaps: "20"
+
+---
+# LimitRange for default resource constraints
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: diagnochain-limits
+  namespace: diagnochain
+spec:
+  limits:
+  - default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    type: Container
+  - max:
+      cpu: "4"
+      memory: "8Gi"
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+    type: Container
+
+---
+# Secret for image pull (if using private registry)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: diagnochain-registry-secret
+  namespace: diagnochain
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: eyJhdXRocyI6e319  # Base64 encoded Docker config
+
+---
+# VerticalPodAutoscaler for intelligent resource scaling
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: diagnochain-backend-vpa
+  namespace: diagnochain
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: diagnochain-backend
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: backend
+      minAllowed:
+        cpu: "100m"
+        memory: "256Mi"
+      maxAllowed:
+        cpu: "2"
+        memory: "4Gi"
+      controlledResources: ["cpu", "memory"]
